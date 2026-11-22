@@ -799,19 +799,23 @@ class SingPlugin(Star):
             prov = await self.context.get_using_provider_async(umo=str(umo))
             if prov is None:
                 return None
-            provider_id = (
-                getattr(prov, "provider_config", {}).get("id")
-                or getattr(prov, "provider_id", None)
-            )
-            if not provider_id:
-                return None
 
-            resp = await self.context.tool_loop_agent(
-                event=None,
-                chat_provider_id=provider_id,
+            # 这里原来走 tool_loop_agent(event=None, ...)，但 AstrBot 4.30 把
+            # AstrAgentContext.event 变成了必填的 AstrMessageEvent，
+            # 传 None 会 pydantic 校验失败：
+            #   1 validation error for AstrAgentContext
+            # 而这个函数是后台任务（歌在后台唱完才回调），手上根本没有 event。
+            #
+            # 我们要的只是「模型说一句话」，不需要工具循环 —— 所以直接调
+            # provider.text_chat，跟 cyber_life 的 llm.complete 是同一个做法。
+            # 下一轮她要记得这件事，靠的是 _remember_performance 单独往会话里
+            # 追加记录，不走这里，所以换掉不影响记忆。
+            resp = await prov.text_chat(
                 prompt=prompt,
-                contexts=[],
-                max_steps=1,
+                system_prompt=(
+                    "你就是你自己。用你平时的口气说一句话就行，"
+                    "不要播报歌名，不要客套。"
+                ),
             )
             text = (getattr(resp, "completion_text", "") or "").strip()
             text = text.strip("“”\"'「」 \n")
