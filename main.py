@@ -996,6 +996,24 @@ class SingPlugin(Star):
         # 记下候选，等用户回数字；选了由 _pick_listener 接手开唱
         self._ask_pick(event, songs)
 
+    def _split_artist_title(self, keyword: str) -> tuple[str, str]:
+        """把「牛奶咖啡唱的明天你好」拆成 (歌手, 歌名)。
+
+        拆不出来就返回 ("", 原串)。宁可不拆也不乱拆 —— 拆错比不拆更糟，
+        因为歌手一旦被当成歌名的一部分，搜出来的结果全是垃圾。
+        """
+        text = (keyword or "").strip()
+        if not text:
+            return "", ""
+        m = self._ARTIST_NAME_RE.match(text)
+        if m:
+            artist = m.group("artist").strip()
+            title = m.group("title").strip()
+            # 两边都得像样才认。歌名太短（1 个字）多半是切歪了。
+            if len(artist) >= 2 and len(title) >= 2 and artist not in self._SING_JUNK:
+                return artist, title
+        return "", text
+
     def _match_by_artist(self, keyword: str, songs: list[dict]) -> dict | None:
         """关键词末尾如果是某位歌手，就返回那位歌手的那首。"""
         words = keyword.split()
@@ -1061,17 +1079,30 @@ class SingPlugin(Star):
                     "source": "cache",
                 }
 
-        # 2) 歌手
+        # 2) 指定了歌手：必须**歌名和歌手都对上**才算命中。
+        #
+        #    原来这里只判歌手（artist_hint in x["artist"] 就 return hits[0]），
+        #    太宽了。11-22 那天搜「明天你好 牛奶咖啡」，第 2 条是《越长大越孤单》
+        #    —— 歌手确实是牛奶咖啡，但不是要的那首，照样会唱错。
+        #    歌名放在前面判，歌手只是加权。
+        base = keyword.split()[0] if keyword.split() else keyword
         if artist_hint:
-            hits = [x for x in pool if artist_hint in (x.get("artist") or "")]
-            if hits:
-                return hits[0]
+            both = [
+                x for x in pool
+                if artist_hint in (x.get("artist") or "")
+                and (base in (x.get("name") or "") or (x.get("name") or "").strip() == base)
+            ]
+            if both:
+                # 同名多版时，无「cover / remix / 翻唱」字样的优先。
+                def _plain(x: dict) -> int:
+                    name = (x.get("name") or "").lower()
+                    return 0 if any(w in name for w in ("cover", "remix", "翻唱", "翻自")) else 1
+                return sorted(both, key=_plain, reverse=True)[0]
         m = self._match_by_artist(keyword, pool)
         if m is not None:
             return m
 
-        # 3) 歌名完全一致
-        base = keyword.split()[0] if keyword.split() else keyword
+        # 3) 歌名完全一致（base 在上面歌手那步已经算过了，这里不重复算）
         exact = [x for x in pool if (x.get("name") or "").strip() == base]
         if exact:
             return exact[0]
@@ -1081,8 +1112,26 @@ class SingPlugin(Star):
         if contains:
             return contains[0]
 
-        # 5) 兜底
-        return sorted(pool, key=lambda x: len(x.get("name") or ""))[0]
+        # 5) 兜底：挑和关键词字面重合最多的，不是挑最短的。
+        #
+        # 🔴 这里原来是 `sorted(pool, key=len)[0]` —— 挑歌名最短的那首。
+        # 这个兜底是反的：字面越不像，越容易选出个不相干的短名字。
+        # 11-22 就是这样唱了《你》：搜「牛奶咖啡唱的明天你好」，20 条结果里
+        # 最短的是 1 个字的《你》，而真正要的《明天，你好》排在第 4 条，
+        # 三个字，永远轮不上。
+        #
+        # 现在按字符重合度排（共同字越多越可能对），重合为 0 就说明没救了。
+        def _overlap(song: dict) -> int:
+            name = song.get("name") or ""
+            artist = song.get("artist") or ""
+            hay = name + artist
+            return sum(1 for ch in set(base) if ch in hay and not ch.isspace())
+
+        best = sorted(pool, key=_overlap, reverse=True)
+        if best and _overlap(best[0]) > 0:
+            return best[0]
+        # 一个字都对不上，真的没救 —— 返回 None 让调用方去问，别硬唱。
+        return None
 
     def _candidate_text(self, keyword: str, songs: list[dict]) -> str:
         count = min(int(self._cfg("list_count", 8)), len(songs))
@@ -1116,6 +1165,16 @@ class SingPlugin(Star):
     _SING_LEAD = re.compile(r"^(你唱|你|唱|首|个|一首|一首歌|歌|的|给|我|来|再)+")
     _SING_JUNK = {"歌", "首歌", "什么", "说说话", "说话", "听", "唱"}
 
+    # 「牛奶咖啡唱的明天你好」这种写法里，歌手和歌名之间没有任何分隔符。
+    # 中文又不写空格，靠 split() 永远切不出来（11-22 点《明天，你好》那回，
+    # 整串被当成一个歌名去搜，20 条结果里最短的是《你》，兜底就唱了《你》）。
+    # 所以直接用中文结构来切：XX唱的YYY / XX的YYY / XX-DD YYY。
+    _ARTIST_NAME_RE = re.compile(
+        r"^(?P<artist>[^，。！？、,.!?《》「」\"'\s]{2,14}?)"
+        r"(?:唱的|唱得|演唱的|原唱的|版的|的|写的|作品)"
+        r"(?P<title>.+)$"
+    )
+
     @filter.regex(
         r"(?:想听|要听|听你唱|唱给我|唱首|来一首|来首|唱个|唱一下|给我唱|你会唱)"
         r"[《「\"']?[\u4e00-\u9fa5A-Za-z0-9 ()（）·\-]{1,30}"
@@ -1139,10 +1198,23 @@ class SingPlugin(Star):
         if not health or not health.get("ok"):
             return
 
-        songs = await self._search(name)
+        # 先把「歌手」从关键词里剥出来，别把「牛奶咖啡唱的明天你好」整串去搜。
+        artist_hint, title = self._split_artist_title(name)
+        query = f"{title} {artist_hint}".strip() if artist_hint else title
+
+        songs = await self._search(query)
+        if not songs and artist_hint:
+            # 带歌手搜不到，退回只搜歌名（歌手名有时会拖累搜索）
+            songs = await self._search(title)
         if not songs:
             return
-        picked = self._pick_best(name, songs)
+        picked = self._pick_best(title, songs, artist_hint)
+        if picked is None:
+            # 一个字都对不上，别硬唱 —— 把候选摆出来让人自己挑。
+            event.set_extra("sing_handled", True)
+            event.stop_event()
+            self._ask_pick(event, songs)
+            return
         picked["_fresh"] = False
 
         event.set_extra("sing_handled", True)
@@ -1334,6 +1406,16 @@ class SingPlugin(Star):
                 return f"搜不到《{song}》，告诉对方换个说法或者你记不清这首歌。"
 
         picked = self._pick_best(song.strip() or keyword, songs, artist.strip())
+        if picked is None:
+            # 一个字都对不上。别硬唱不相干的歌，把候选列给模型,
+            # 让它自己去问对方要哪个版本。
+            listing = "\n".join(
+                f"{i}. {x['name']} — {x['artist']}" for i, x in enumerate(songs[:5], 1)
+            )
+            return (
+                f"搜「{song}」出来的都不太对得上。候选有：\n{listing}\n"
+                "别自己挑，把这几首报给对方，问要哪个（或者问是不是记错歌名了）。"
+            )
         picked["_fresh"] = False
         cached = self._find_cached(picked["name"], picked["artist"])
         self._spawn(self._run_sing(event, picked))
