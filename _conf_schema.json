@@ -1,0 +1,124 @@
+{
+  "enabled": {
+    "description": "启用唱歌",
+    "type": "bool",
+    "default": true,
+    "hint": "总开关。关闭后 /唱歌 和模型自动点歌都不工作。"
+  },
+  "rvc_url": {
+    "description": "rvc-next 地址",
+    "type": "string",
+    "default": "http://127.0.0.1:7868",
+    "hint": "填根地址即可，不要带 /api。"
+  },
+  "voice_id": {
+    "description": "唱歌用的音色",
+    "type": "string",
+    "default": "xilian",
+    "options": [
+      "xilian",
+      "xilian3",
+      "xilian_me"
+    ],
+    "hint": "和「语音回复」共用同一个音色，两边改哪边都行。想换成别的音色，先去 rvc-next 模型库导入，再在这个插件页点一次重载，下拉列表就会更新。"
+  },
+  "preset": {
+    "description": "人声分离预设",
+    "type": "string",
+    "default": "karaoke",
+    "hint": "karaoke（主唱，最轻）、vocals（BS-RoFormer，音质好但吃显存）、vocals-clean（分离+去混响）。8G 显存建议 karaoke。"
+  },
+  "pitch": {
+    "description": "变调（半音）",
+    "type": "float",
+    "default": 0.0,
+    "hint": "0 保持原调。男声源转女声约 +12，女声转男声约 -12。"
+  },
+  "index_rate": {
+    "description": "索引贴合度（唱歌专用）",
+    "type": "float",
+    "default": 0.75,
+    "hint": "0~1，越高越贴模型原本的音色，越低越像原唱。唱歌建议 0.7~0.8；说话那边是 0.55，两边各管各的。"
+  },
+  "protect": {
+    "description": "气声/辅音保护（唱歌专用）",
+    "type": "float",
+    "default": 0.33,
+    "hint": "0~0.5，数值越大越保护原曲里的气声和齿音。唱歌 0.3 左右即可；说话那边是 0.45。注意 0.5 等于关掉保护。"
+  },
+  "f0_method": {
+    "description": "音高提取算法",
+    "type": "string",
+    "default": "rmvpe",
+    "options": [
+      "rmvpe",
+      "harvest",
+      "crepe"
+    ],
+    "hint": "rmvpe 质量最好、也最稳，一般不用改。"
+  },
+  "max_seconds": {
+    "description": "最长处理时长（秒）",
+    "type": "int",
+    "default": 300,
+    "hint": "超过这个时长的歌拒绝处理，避免等太久、也避免爆显存。0 表示不限制。"
+  },
+  "timeout": {
+    "description": "等待转换完成的上限（秒）",
+    "type": "int",
+    "default": 900,
+    "hint": "一首 4 分钟的歌大约 60~120 秒。给足余量。"
+  },
+  "send_text": {
+    "description": "连发一句文字",
+    "type": "bool",
+    "default": true,
+    "hint": "发语音前先说一句「给你唱：歌名」，让对话不突兀。"
+  },
+  "group_on": {
+    "description": "群聊也能点歌",
+    "type": "bool",
+    "default": false,
+    "hint": "关闭时群里只有管理员能用 /唱歌，避免被刷。"
+  },
+  "llm_tool_enabled": {
+    "description": "允许模型自己唱",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后模型可以自己决定点歌（比如你说「唱首歌给我听」）。"
+  },
+  "list_count": {
+    "description": "搜索返回条数",
+    "type": "int",
+    "default": 8,
+    "hint": "点歌时列出几个候选。"
+  },
+  "download_dir": {
+    "description": "原音频下载目录（放 D 盘别占 C 盘）",
+    "type": "string",
+    "default": "D:\\GAME\\Codex++Ollama\\RVC\\sing\\downloads"
+  },
+  "output_dir": {
+    "description": "转换完成的歌曲成品保存目录",
+    "type": "string",
+    "default": "D:\\GAME\\Codex++Ollama\\RVC\\sing\\output_sing"
+  },
+  "reuse_cache": {
+    "description": "唱过的歌直接复用",
+    "type": "bool",
+    "default": true,
+    "hint": "成品目录里已有这首歌（歌名+歌手相同）就直接发，跳过下载和转换。加 --重唱 可强制重来。"
+  },
+  "chat_trigger": {
+    "description": "聊天里直接点歌",
+    "type": "bool",
+    "default": true,
+    "hint": "说「我想听你唱心湖」这类话就能触发，不用打 /唱歌 指令。关掉后只能用指令或模型主动调用。"
+  },
+  "remember_singing": {
+    "description": "让她记得自己唱过",
+    "type": "bool",
+    "default": true,
+    "hint": "唱完把「我唱了《XX》」记进她的会话，下一轮她记得。关掉只会影响记忆，不影响发送。"
+  }
+}

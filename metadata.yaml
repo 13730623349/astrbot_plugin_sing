@@ -1,0 +1,29 @@
+name: astrbot_plugin_sing
+display_name: 唱歌翻唱
+short_desc: 用你自己的 RVC 音色唱整首歌
+desc: |
+  给她一个歌名，她用**你自己的 RVC 音色**唱整首歌唱给你听。
+
+  链路：搜歌 → 下载原曲 → rvc-next 分离人声 → 换成她的音色 → 混回伴奏 → 发语音。
+
+  特性：
+  - `/唱歌 歌名` 直接点歌，后台生成完自动发
+  - 搜索到多个版本会列出来让你挑，回数字选择
+  - 模型也能自己决定唱（LLM 工具 `sing_song`）
+  - 音源用歌曲海（酷我），取不到流自动切网易云
+  - 8G 显存自动用轻量分离预设，爆显存会自己降级重试
+  - 原音频和成品分目录存放，可指定到 D 盘不占 C 盘
+  - MP3 直传发送，避开 AstrBot 强制转 WAV 导致的体积爆炸
+
+  需要本机跑着 rvc-next（默认 127.0.0.1:7868）。
+version: 1.0.0
+author: cyrene
+repo: ""
+astrbot_version: ">=4.17.0"
+support_platforms:
+  - aiocqhttp
+tags:
+  - 唱歌
+  - 翻唱
+  - rvc
+  - 语音
