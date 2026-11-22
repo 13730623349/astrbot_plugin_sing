@@ -1061,20 +1061,23 @@ class SingPlugin(Star):
         picked = self._match_by_artist(keyword, songs)
 
         # 只剩一个就没什么好选的，直接唱
+        # 先起后台任务，再 yield —— yield 之后生成器可能不再被推进，
+        # 把 _spawn 放在后面有可能压根不执行（那就永远不唱了）。
         if picked is not None:
-            yield event.plain_result(f"开唱：{picked['name']} — {picked['artist']}")
             self._spawn(self._run_sing(event, picked))
+            yield event.plain_result(f"开唱：{picked['name']} — {picked['artist']}")
             return
 
         if len(songs) == 1:
             song = songs[0]
-            yield event.plain_result(f"开唱：{song['name']} — {song['artist']}")
             self._spawn(self._run_sing(event, song))
+            yield event.plain_result(f"开唱：{song['name']} — {song['artist']}")
             return
 
-        yield event.plain_result(self._candidate_text(keyword, songs))
-        # 记下候选，等用户回数字；选了由 _pick_listener 接手开唱
+        # 顺序同上面那两处：**先记待选再 yield**，否则用户回数字时
+        # 生成器可能已经不再推进，_ask_pick 没机会执行。
         self._ask_pick(event, songs)
+        yield event.plain_result(self._candidate_text(keyword, songs))
 
     def _split_artist_title(self, keyword: str) -> tuple[str, str]:
         """把「牛奶咖啡唱的明天你好」拆成 (歌手, 歌名)。
@@ -1260,6 +1263,14 @@ class SingPlugin(Star):
             "ts": time.time(),
             "umo": event.unified_msg_origin,
         }
+        # 留一行日志。11-22 那次「回 1 没反应」，日志里一点痕迹都没有，
+        # 只能靠猜 —— 到底待选存没存、存到哪个 umo 下，全看不出来。
+        logger.info(
+            "[sing] 待选已记录 umo=%s 共 %d 个（%s）",
+            event.unified_msg_origin,
+            count,
+            "、".join(f"{s['name']}/{s['artist']}" for s in songs[:count]),
+        )
 
     # 聊天里点名要听歌（模型没调工具时的兜底）
     _SING_TRIGGER = (
@@ -1321,14 +1332,25 @@ class SingPlugin(Star):
         if picked is not None and not artist_hint and self._picked_is_guess(picked, songs):
             event.set_extra("sing_handled", True)
             event.stop_event()
-            yield event.plain_result(self._candidate_text(title, songs))
+            # 🔴 顺序很要紧：**先记待选，再 yield 回复**。
+            #
+            # 原来是 yield 完才 _ask_pick()。而框架是这么消费异步生成器的
+            # （pipeline/context_utils.py:50）：
+            #     async for ret in ready_to_call:   # 收一个 yield
+            #         event.set_result(ret)
+            #         yield                          # 把控制权交回上层
+            # 一旦上层判断事件该停，生成器可能就不会再被推进 ——
+            # 于是 _ask_pick 永远轮不到执行，待选是空的。
+            # 表现就是：候选发出去了，用户回「1」却当普通聊天（11-22 踩了两次）。
             self._ask_pick(event, songs)
+            yield event.plain_result(self._candidate_text(title, songs))
             return
         if picked is None:
             # 一个字都对不上，别硬唱 —— 把候选摆出来让人自己挑。
             event.set_extra("sing_handled", True)
             event.stop_event()
             self._ask_pick(event, songs)
+            yield event.plain_result(self._candidate_text(title, songs))
             return
         picked["_fresh"] = False
 
@@ -1373,6 +1395,15 @@ class SingPlugin(Star):
         没有待选歌单时什么都不做，照常当普通聊天处理。"""
         umo = event.unified_msg_origin
         pending = self._pending.get(umo)
+        # 这行是排查用的：能区分「根本没触发」和「触发了但没找到待选」。
+        # 11-22 回「1」没反应，日志静悄悄，两种可能分不清。
+        logger.info(
+            "[sing] _pick_listener 触发 text=%r umo=%s 待选=%s（已有 %s）",
+            (event.message_str or "").strip(),
+            umo,
+            "有" if pending else "无",
+            list(self._pending.keys()) or "空",
+        )
         if not pending:
             return
         if time.time() - pending["ts"] > 90:
@@ -1395,8 +1426,9 @@ class SingPlugin(Star):
 
         self._pending.pop(umo, None)
         song = pending["songs"][index]
-        yield event.plain_result(f"开唱：{song['name']} — {song['artist']}")
+        # 先起任务再回复，道理同前：yield 之后生成器不一定会再被推进。
         self._spawn(self._run_sing(_EventStub(pending["umo"]), song))
+        yield event.plain_result(f"开唱：{song['name']} — {song['artist']}")
         event.stop_event()
 
     @filter.command("发歌")
