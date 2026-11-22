@@ -28,6 +28,7 @@ import asyncio
 import html as html_lib
 import json
 import os
+import random
 import re
 import shutil
 import tempfile
@@ -839,6 +840,33 @@ class SingPlugin(Star):
         await self.context.send_message(umo, MessageChain(chain))
         return True
 
+    async def _persona_prompt(self, umo: str) -> str:
+        """取当前人格的原文。取不到就返回空串。
+
+        为什么非要这个：不传人格，这句「刚唱完说的话」就是一个**裸模型**在写字 ——
+        礼貌、工整、"希望你喜欢这首歌哦"，跟播放器播报没区别。
+        人格原文里才有她的称呼、口头禅和脾气，那才是"人味"。
+
+        ⚠️ 字段名是 `prompt`，不是 `system_prompt`。写成后者取出来永远是空串，
+        而且不报错 —— cyber_life 那边为这个坑写过一遍注释，别再踩。
+        """
+        try:
+            mgr = getattr(self.context, "persona_manager", None)
+            if mgr is None:
+                return ""
+            persona = await mgr.get_default_persona_v3(umo)
+            if not persona:
+                return ""
+            text = (
+                persona.get("prompt")
+                if isinstance(persona, dict)
+                else getattr(persona, "system_prompt", "")
+            )
+            return str(text or "")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[sing] 取人格失败（不影响唱歌）：%s", exc)
+            return ""
+
     async def _her_words(
         self,
         umo: str,
@@ -886,12 +914,21 @@ class SingPlugin(Star):
             # provider.text_chat，跟 cyber_life 的 llm.complete 是同一个做法。
             # 下一轮她要记得这件事，靠的是 _remember_performance 单独往会话里
             # 追加记录，不走这里，所以换掉不影响记忆。
+            # 人格原文拼在最前面。没有它，模型不知道自己是谁，
+            # 说出来的话是"礼貌的机器"，不是她。
+            persona = await self._persona_prompt(str(umo))
+            system = "\n\n".join(
+                p
+                for p in (
+                    persona,
+                    "你刚唱完一首歌，现在要用你自己平时的口气说一句话。"
+                    "短、松、像刚唱完喘口气那样。不要客套，不要播报歌名。",
+                )
+                if p
+            )
             resp = await prov.text_chat(
                 prompt=prompt,
-                system_prompt=(
-                    "你就是你自己。用你平时的口气说一句话就行，"
-                    "不要播报歌名，不要客套。"
-                ),
+                system_prompt=system,
             )
             text = (getattr(resp, "completion_text", "") or "").strip()
             text = text.strip("“”\"'「」 \n")
@@ -1065,13 +1102,13 @@ class SingPlugin(Star):
         # 把 _spawn 放在后面有可能压根不执行（那就永远不唱了）。
         if picked is not None:
             self._spawn(self._run_sing(event, picked))
-            yield event.plain_result(f"开唱：{picked['name']} — {picked['artist']}")
+            yield event.plain_result(self._open_line())
             return
 
         if len(songs) == 1:
             song = songs[0]
             self._spawn(self._run_sing(event, song))
-            yield event.plain_result(f"开唱：{song['name']} — {song['artist']}")
+            yield event.plain_result(self._open_line())
             return
 
         # 顺序同上面那两处：**先记待选再 yield**，否则用户回数字时
@@ -1243,15 +1280,26 @@ class SingPlugin(Star):
         ]
         return bool(others)
 
+    # 列候选的开场白。原来那句「《X》找到 N 个版本，要唱哪个？」是检索结果页的口气，
+    # 不像人在说话。换成人随口说的几种。
+    _PICK_LINES = (
+        "《{kw}》有好几个版本诶，你要哪个？",
+        "《{kw}》找到这 {n} 个，挑一个？",
+        "《{kw}》能唱的有这些，你要听哪版？",
+        "《{kw}》有 {n} 个版本，你说哪个我就唱哪个",
+    )
+
     def _candidate_text(self, keyword: str, songs: list[dict]) -> str:
         count = min(int(self._cfg("list_count", 8)), len(songs))
-        lines = [f"《{keyword}》找到 {len(songs)} 个版本，要唱哪个？"]
+        lines = [
+            random.choice(self._PICK_LINES).format(kw=keyword, n=len(songs))
+        ]
         for i in range(count):
             song = songs[i]
             lines.append(f"{i + 1}. {song['name']} — {song['artist']}")
         if len(songs) > count:
             lines.append(f"（只列前 {count} 个）")
-        lines.append("回一个数字，或者回「取消」。")
+        lines.append("回我一个数字就行，不唱了就说「取消」。")
         return "\n".join(lines)
 
     def _ask_pick(self, event: AstrMessageEvent, songs: list[dict]) -> None:
@@ -1272,7 +1320,22 @@ class SingPlugin(Star):
             "、".join(f"{s['name']}/{s['artist']}" for s in songs[:count]),
         )
 
-    # 聊天里点名要听歌（模型没调工具时的兜底）
+    # 「开唱：歌名 — 歌手」这种播报，跟音乐播放器没区别，一点人味都没有。
+    # 换成几种随口说的话，随机挑——同一个说法连说三次也会腻。
+    # 注意：这里**故意不播报歌手名**，没人会对着空气念自己的歌单。
+    _OPEN_LINES = (
+        "好，唱这个",
+        "嗯…这版我也喜欢",
+        "那就这个吧，等我一下",
+        "行，我哼给你听",
+        "这首啊，来",
+        "好，试一下这首",
+    )
+
+    def _open_line(self) -> str:
+        """开唱前随口说一句。"""
+        return random.choice(self._OPEN_LINES)
+
     _SING_TRIGGER = (
         r"(?:想听你唱|想听|要听|听你唱|唱给我听|唱给我|唱首|"
         r"来一首|来首|唱个|唱一下|给我唱|你会唱)"
@@ -1428,7 +1491,7 @@ class SingPlugin(Star):
         song = pending["songs"][index]
         # 先起任务再回复，道理同前：yield 之后生成器不一定会再被推进。
         self._spawn(self._run_sing(_EventStub(pending["umo"]), song))
-        yield event.plain_result(f"开唱：{song['name']} — {song['artist']}")
+        yield event.plain_result(self._open_line())
         event.stop_event()
 
     @filter.command("发歌")
