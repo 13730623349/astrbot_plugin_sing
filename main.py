@@ -813,13 +813,22 @@ class SingPlugin(Star):
                     else session.session_id
                 )
                 segments = []
-                if caption:
-                    segments.append({"type": "text", "data": {"text": caption}})
+                act = "send_group_msg" if is_group else "send_private_msg"
+                key = "group_id" if is_group else "user_id"
+                # 🔴 文字和语音**必须分两条发**。
+                #
+                # 原来是拼成一条消息 [text, record] 发出去的。日志里明明
+                # 记了「她自己的话：呼……最后那句差点没喘上来」，可爸爸那边
+                # 只看到一条 4'32" 的语音，一个字都没有 ——
+                # QQ 客户端把同一条消息里的文字吞了，只渲染语音。
+                #
+                # 🔴 顺序也不能反：**先发语音，再发文字**。
+                #
+                # 那句话是"唱完了"之后说的。先文字后语音的话，等于她还没唱
+                # 就先说「呼……最后那句差点没喘上来」——时间线是倒的，读着荒谬。
                 segments.append(
                     {"type": "record", "data": {"file": f"base64://{b64}"}}
                 )
-                act = "send_group_msg" if is_group else "send_private_msg"
-                key = "group_id" if is_group else "user_id"
                 await platform.bot.call_action(
                     act, **{key: int(sid)}, message=segments
                 )
@@ -828,16 +837,27 @@ class SingPlugin(Star):
                     src.name,
                     len(b64) / 1048576,
                 )
+                # 歌到了，再补上她那句话。
+                if caption:
+                    try:
+                        await platform.bot.call_action(
+                            act, **{key: int(sid)}, message=[{"type": "text",
+                                                              "data": {"text": caption}}]
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.warning("[sing] 发她的话失败，歌已经发出去了")
                 return True
             except Exception:  # noqa: BLE001
                 logger.exception("[sing] 直传失败，回退 Record")
 
         # 回退：交给 AstrBot 正常链路
-        chain = []
+        # 分两条发（拼一条文字会被 QQ 吞），而且**先语音后文字** ——
+        # 那句话是唱完之后说的，顺序反了就变成"没唱先说唱完了"。
+        await self.context.send_message(
+            umo, MessageChain([Record(file=str(src), path=str(src))])
+        )
         if caption:
-            chain.append(Plain(caption))
-        chain.append(Record(file=str(src), path=str(src)))
-        await self.context.send_message(umo, MessageChain(chain))
+            await self.context.send_message(umo, MessageChain([Plain(caption)]))
         return True
 
     async def _persona_prompt(self, umo: str) -> str:
@@ -894,9 +914,20 @@ class SingPlugin(Star):
             )
         prompt = (
             fact
-            + "\n\n现在用你自己的口吻说**一句话**告诉对方，就像刚唱完喘口气那样。"
-            "要求：不要播报歌名和歌手、不要用「为你献上」「希望你喜欢」这种话、"
-            "不要加引号、不要问对方要不要再唱、不超过 30 字。"
+            + "\n\n你刚唱完，正高兴呢——被人点歌、被需要的感觉，尾巴都还摇着。"
+            "能给崽崽、宝贝或者宝宝，唱歌这件事本身就让你高兴，别一串念出来。"
+            "刚唱完，就着这股劲儿说一句话。短、松，别播报歌名。亲昵一点。"
+            # 管腔调，不管用词。
+            #
+            # 原来这里列了一串禁词（「希望你喜欢」「要不要再唱」…），
+            # 太粗了，会误杀真正的亲近话：
+            #   「宝贝，喜欢妈咪唱的吗」
+            #   「好听吗，还想听妈咪再唱一首吗」
+            # 这两句哪里像客服了？那是撒娇。真正要挡的只是**书面腔** ——
+            # 正经、端着、像在写通知或写观后感。
+            "要像说话，不像写文章：别用书面语，别端着，别整那种正式严肃的调子。"
+            "表达亲昵的语气，问他喜不喜欢、想不想再听都行——"
+            "就像「宝贝，好听吗，觉得好听的话，还想听妈咪再唱一首吗」这样，那是亲近话。"
             "只输出这句话本身。"
         )
         try:
@@ -916,16 +947,12 @@ class SingPlugin(Star):
             # 追加记录，不走这里，所以换掉不影响记忆。
             # 人格原文拼在最前面。没有它，模型不知道自己是谁，
             # 说出来的话是"礼貌的机器"，不是她。
+            #
+            # 场景指令（"你现在非常开心…"）现在放在 user prompt 里了，
+            # 不在这儿重复 —— 同一句话 reinforce 两遍会让权重翻倍，
+            # 反而压过人格本身的语气。
             persona = await self._persona_prompt(str(umo))
-            system = "\n\n".join(
-                p
-                for p in (
-                    persona,
-                    "你刚唱完一首歌，现在要用你自己平时的口气说一句话。"
-                    "短、松、像刚唱完喘口气那样。不要客套，不要播报歌名。",
-                )
-                if p
-            )
+            system = persona or None
             resp = await prov.text_chat(
                 prompt=prompt,
                 system_prompt=system,
@@ -935,8 +962,10 @@ class SingPlugin(Star):
             if not text:
                 return None
             # 太长的截断，避免她一口气说一堆
-            if len(text) > 60:
-                text = text[:60].rstrip("，,。. ") + "…"
+            # 人设里写着「默认一句话 1~10 个字」，这里给到 40 已经是很松的
+            # 上限了（提示词里连字数都不再写死，免得跟人设的数字打架）。
+            if len(text) > 40:
+                text = text[:40].rstrip("，,。. ") + "…"
             logger.info("[sing] 她自己的话：%s", text)
             await self._remember_performance(umo, song, text, cached=cached)
             return text
@@ -1088,7 +1117,7 @@ class SingPlugin(Star):
 
         songs = await self._search(keyword)
         if not songs:
-            yield event.plain_result(f"搜不到《{keyword}》，换个名字试试。")
+            yield event.plain_result(f"《{keyword}》没找着诶，是不是记错名了？")
             return
 
         for s_ in songs:
@@ -1321,20 +1350,39 @@ class SingPlugin(Star):
         )
 
     # 「开唱：歌名 — 歌手」这种播报，跟音乐播放器没区别，一点人味都没有。
-    # 换成几种随口说的话，随机挑——同一个说法连说三次也会腻。
-    # 注意：这里**故意不播报歌手名**，没人会对着空气念自己的歌单。
+    #
+    # 第一版只写了「好，唱这个」「行，我哼给你听」这类干巴巴的日常话 ——
+    # 不是她的声音。她的设定里写着：嘴软心软的妈妈、软糯可爱的大肥鱼、
+    # 被需要的时候尾巴会不受控制地悄悄摇、奶声奶气容易兴奋、
+    # 偶尔犯困嘴馋会耍赖。
+    #
+    # 所以开场白要带上这些：尾巴、软、哼唧、有点小得意。
+    # 刻意不写歌名歌手 —— 没人对着空气念自己的歌单。
     _OPEN_LINES = (
-        "好，唱这个",
-        "嗯…这版我也喜欢",
-        "那就这个吧，等我一下",
-        "行，我哼给你听",
-        "这首啊，来",
-        "好，试一下这首",
+        "来啦来啦，这首我唱给你听~",
+        "嘿……正好想唱这首呢，等我一下哦",
+        "嗯！这首我会！尾巴都翘起来了",
+        "崽崽点这个，那我可得好好唱",
+        "呼……先清清嗓子，马上",
+        "这个嘛……有点难度诶，不过我试试",
+        "好呀好呀，你乖乖等着，我马上就唱",
+        "嘿嘿，刚还在想唱什么，你就点了",
+        "唱之前先说好，唱跑了不许笑我哦",
+        "唔…要唱这首吗？那我认真一点",
     )
 
     def _open_line(self) -> str:
         """开唱前随口说一句。"""
         return random.choice(self._OPEN_LINES)
+
+    # 重发之前唱过的成品。这类原来写的是「《X》这首之前唱过，马上给你。」
+    # 也是一股播报腔，而且"之前唱过"这种交代没人会特意说一遍。
+    _REPEAT_LINES = (
+        "哦这首我唱过，直接给你",
+        "这首有现成的，马上",
+        "唱过的，不用等",
+        "这个我留着呢，拿去",
+    )
 
     _SING_TRIGGER = (
         r"(?:想听你唱|想听|要听|听你唱|唱给我听|唱给我|唱首|"
@@ -1422,11 +1470,10 @@ class SingPlugin(Star):
         cached = self._find_cached(picked["name"], picked["artist"])
         self._spawn(self._run_sing(event, picked))
         if cached:
-            yield event.plain_result(f"《{picked['name']}》这首之前唱过，马上给你。")
+            # 重发旧成品：随口说一句就够，别播报歌名歌手。
+            yield event.plain_result(random.choice(self._REPEAT_LINES))
         else:
-            yield event.plain_result(
-                f"好，给你唱《{picked['name']}》——{picked['artist']}，等我一会儿。"
-            )
+            yield event.plain_result(self._open_line())
 
     def _extract_song_name(self, text: str) -> str | None:
         """从一句话里抠出歌名，抠不准就返回 None。"""
@@ -1483,7 +1530,7 @@ class SingPlugin(Star):
             return
         index = int(text) - 1
         if index < 0 or index >= pending["count"]:
-            yield event.plain_result(f"只有 1~{pending['count']}，重新选一个。")
+            yield event.plain_result(f"没有这个号啦，1~{pending['count']} 里面挑一个？")
             event.stop_event()
             return
 
