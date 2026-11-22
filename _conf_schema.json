@@ -16,9 +16,10 @@
     "type": "string",
     "default": "xilian",
     "options": [
+      "dafeiyu",
       "xilian",
-      "xilian3",
-      "xilian_me"
+      "xilian_me",
+      "zhouyuling"
     ],
     "hint": "和「语音回复」共用同一个音色，两边改哪边都行。想换成别的音色，先去 rvc-next 模型库导入，再在这个插件页点一次重载，下拉列表就会更新。"
   },
