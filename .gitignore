@@ -1,5 +1,13 @@
 ﻿
-# --- 2026-11-22 加的保护规则（避免把运行数据入库）---
+# 下载与生成的音频（体积大，不入库）
+downloads/
+output_sing/
+output/
+*.mp3
+*.wav
+*.flac
+
+# 运行数据
 __pycache__/
 *.py[cod]
 *.db
@@ -7,3 +15,6 @@ __pycache__/
 *.db-wal
 *.log
 
+# 编辑器
+.vscode/
+.idea/
