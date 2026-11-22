@@ -1213,6 +1213,33 @@ class SingPlugin(Star):
         # 一个字都对不上，真的没救 —— 返回 None 让调用方去问，别硬唱。
         return None
 
+    def _picked_is_guess(self, picked: dict | None, songs: list[dict]) -> bool:
+        """挑出来的结果是不是「没把握、只能猜」。
+
+        什么时候算猜：搜索结果里有 **≥2 个不同艺人的同名版本**，
+        而用户又没指定歌手 —— 那就是 12 条结果里 8 条都叫《明天你好》，
+        凭什么知道要哪一个。
+
+        11-22 就是这么唱错的：搜「明天你好」出来沈清沅、谭艳、刘德丽…
+        人家要的是牛奶咖啡，系统挑了第一条，直接开唱，连问都没问。
+
+        这种情况下应该把候选摆出来让人挑，而不是自作主张。
+        """
+        if not songs:
+            return False
+        if picked is None:
+            return True
+        # 挑中那首之外，还有没有同名不同人的版本
+        name = (picked.get("name") or "").strip()
+        artist = (picked.get("artist") or "").strip()
+        others = [
+            s
+            for s in songs
+            if (s.get("name") or "").strip() == name
+            and (s.get("artist") or "").strip() != artist
+        ]
+        return bool(others)
+
     def _candidate_text(self, keyword: str, songs: list[dict]) -> str:
         count = min(int(self._cfg("list_count", 8)), len(songs))
         lines = [f"《{keyword}》找到 {len(songs)} 个版本，要唱哪个？"]
@@ -1289,6 +1316,14 @@ class SingPlugin(Star):
         if not songs:
             return
         picked = self._pick_best(title, songs, artist_hint)
+        # 没把握就别自作主张：多个人唱同一首歌、用户又没指定歌手，
+        # 说明人家要的不一定是第一条。列出来问一句。
+        if picked is not None and not artist_hint and self._picked_is_guess(picked, songs):
+            event.set_extra("sing_handled", True)
+            event.stop_event()
+            yield event.plain_result(self._candidate_text(title, songs))
+            self._ask_pick(event, songs)
+            return
         if picked is None:
             # 一个字都对不上，别硬唱 —— 把候选摆出来让人自己挑。
             event.set_extra("sing_handled", True)
@@ -1486,6 +1521,15 @@ class SingPlugin(Star):
                 return f"搜不到《{song}》，告诉对方换个说法或者你记不清这首歌。"
 
         picked = self._pick_best(song.strip() or keyword, songs, artist.strip())
+        # 和聊天兜底同一条规矩：多个人唱同一首、又没指定歌手，就别自作主张。
+        if picked is not None and not artist.strip() and self._picked_is_guess(picked, songs):
+            listing = "\n".join(
+                f"{i}. {x['name']} — {x['artist']}" for i, x in enumerate(songs[:5], 1)
+            )
+            return (
+                f"这首歌有好几个人唱过，版本不一样：\n{listing}\n"
+                "先别唱，把这几首报给对方，问要哪个版本（或者问是不是记错歌名了）。"
+            )
         if picked is None:
             # 一个字都对不上。别硬唱不相干的歌，把候选列给模型,
             # 让它自己去问对方要哪个版本。
