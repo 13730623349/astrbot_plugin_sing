@@ -17,7 +17,7 @@ desc: |
 
   需要本机跑着 rvc-next（默认 127.0.0.1:7868）。
 version: 1.0.0
-author: cyrene
+author: Stopful
 repo: ""
 astrbot_version: ">=4.17.0"
 support_platforms:
