@@ -58,6 +58,15 @@ class _EventStub:
 
 GEQUHAI = "https://www.gequhai.com"
 GDSTUDIO = "https://music-api.gdstudio.xyz/api.php"
+# 米兔音乐（www.qqmp3.vip）。第三方聚合站，音源是酷我。
+# 前两层（歌曲海 / 网易云）常常搜不到原唱 —— 比如《明天，你好》牛奶咖啡版，
+# gdstudio 里一条都没有，这里能搜到。所以放在最后兜底。
+#
+# 两个接口分工完全不同，别搞混：
+#   api/songs.php?type=search&keyword=X   → 搜索，拿 rid
+#   api/songs.php?type=download&rid=X     → ❌ 只给夸克网盘链接，不能程序化下载
+#   api/kw.php?rid=X&type=json&level=exhigh → ✅ 酷我 mp3 直链 + LRC 歌词
+QQMP3 = "https://www.qqmp3.vip"
 BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
@@ -259,12 +268,18 @@ class SingPlugin(Star):
         """发请求并解析 JSON。连不上/超时一律返回 None，不往上抛。
 
         调用方要靠 None 判断失败：语音服务没起是常态，不该让异常冒到聊天里。
+
+        headers 是**合并**的，不是覆盖：会话已经带了一个 UA，
+        kwargs 里再传 headers={"Referer": ...} 会重复传参报错，
+        所以在这里合一下（米兔音乐要带 Referer）。
         """
         status = 0
+        extra_headers = kwargs.pop("headers", None) or {}
+        headers = {"User-Agent": BROWSER_UA, **extra_headers}
         try:
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=timeout),
-                headers={"User-Agent": BROWSER_UA},
+                headers=headers,
             ) as session:
                 async with session.request(method, url, **kwargs) as resp:
                     status = resp.status
@@ -335,12 +350,51 @@ class SingPlugin(Star):
             for item in data
         ]
 
+    async def _search_qqmp3(self, keyword: str) -> list[dict]:
+        """米兔音乐搜索。第三方聚合站，音源是酷我。
+
+        不加 Referer 有时会被挡，顺手带上。失败一律返回空列表 ——
+        它是最后一层兜底，挂了不能影响前面几层的行为。
+        """
+        data = await self._json(
+            "GET",
+            f"{QQMP3}/api/songs.php",
+            params={"type": "search", "keyword": keyword},
+            headers={"User-Agent": BROWSER_UA, "Referer": f"{QQMP3}/"},
+        )
+        if not isinstance(data, dict) or data.get("code") != 200:
+            return []
+        rows = data.get("data") or []
+        if not isinstance(rows, list):
+            return []
+        songs = []
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            rid = str(item.get("rid") or "").strip()
+            name = str(item.get("name") or "").strip()
+            if not rid or not name:
+                continue
+            songs.append(
+                {
+                    "id": rid,
+                    "name": name,
+                    "artist": str(item.get("artist") or "").strip() or "未知",
+                    "source": "qqmp3",
+                }
+            )
+        return songs
+
     async def _search(self, keyword: str) -> list[dict]:
         songs = await self._search_gequhai(keyword)
         if songs:
             return songs
         logger.info("[sing] 歌曲海无结果，切网易云")
-        return await self._search_netease(keyword)
+        songs = await self._search_netease(keyword)
+        if songs:
+            return songs
+        logger.info("[sing] 网易云也无结果，切米兔音乐")
+        return await self._search_qqmp3(keyword)
 
     # ------------------------------------------------------------ 取直链
 
@@ -381,8 +435,30 @@ class SingPlugin(Star):
         )
         return ((data or {}).get("url") or "").strip()
 
+    async def _url_qqmp3(self, rid: str) -> str:
+        """从米兔音乐拿酷我 mp3 直链。
+
+        实测返回的是 car-er.kuwo.cn 的真实 mp3（文件头 ID3），不是跳转页。
+        level=exhigh 是它接口认的档位；lrc=true 顺带把歌词也返回，暂时不用。
+        """
+        data = await self._json(
+            "GET",
+            f"{QQMP3}/api/kw.php",
+            params={"rid": rid, "type": "json", "level": "exhigh", "lrc": "true"},
+            headers={"User-Agent": BROWSER_UA, "Referer": f"{QQMP3}/"},
+        )
+        if not isinstance(data, dict):
+            return ""
+        payload = data.get("data")
+        if not isinstance(payload, dict):
+            return ""
+        return str(payload.get("url") or "").strip()
+
     async def _resolve(self, song: dict) -> str:
-        if song.get("source") == "gequhai":
+        source = song.get("source")
+        if source == "qqmp3":
+            return await self._url_qqmp3(song["id"])
+        if source == "gequhai":
             return await self._url_gequhai(song["id"]) or await self._url_netease(
                 song["id"]
             )
